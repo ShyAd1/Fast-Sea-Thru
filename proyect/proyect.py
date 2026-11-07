@@ -45,6 +45,7 @@ DEFAULT_CUDA_BLOCK_Y = 16
 DEFAULT_GPU_FIT_STEPS = 120
 MAX_FIT_POINTS = 200_000  # cap on points used by the GPU/CPU curve fits (avoids OOM)
 MIN_FAR = 1.0  # lower bound for the estimated far distance
+DEFAULT_DEPTH_SHIFT = 2.0  # disparity offset in depth = 10/(9.5*disp + shift); see merge notes
 ATT_NUM_BINS = 48  # equal-count depth bins used by the robust attenuation fit
 ATT_MIN_BIN_COUNT = 20
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
@@ -136,9 +137,41 @@ def _load_dll():
     return None
 
 
+def merge_disparity_scales(
+    disp_lo: np.ndarray, disp_hi: np.ndarray, sigma_frac: float = 0.03
+) -> np.ndarray:
+    """Combine a coarse (globally consistent) and a fine (detailed) disparity map.
+
+    Low frequencies come from `disp_lo`; high frequencies (detail) from `disp_hi`,
+    after an affine alignment of `disp_hi` to `disp_lo` (relative disparity has an
+    arbitrary scale and shift per inference). Falls back to `disp_lo` if the two
+    maps are not positively correlated.
+    """
+    H, W = disp_lo.shape
+    s = max(2.0, float(sigma_frac) * min(H, W))
+    lo32 = disp_lo.astype(np.float32)
+    hi32 = disp_hi.astype(np.float32)
+    lo_l = cv2.GaussianBlur(lo32, (0, 0), s)
+    hi_l = cv2.GaussianBlur(hi32, (0, 0), s)
+    step = max(1, int(math.sqrt(lo_l.size / 100_000.0)))
+    x = hi_l[::step, ::step].ravel().astype(np.float64)
+    y = lo_l[::step, ::step].ravel().astype(np.float64)
+    var = float(np.var(x))
+    if var < 1e-12:
+        return disp_lo
+    a = float(np.mean((x - x.mean()) * (y - y.mean())) / var)
+    if not np.isfinite(a) or a <= 0:
+        return disp_lo
+    b = float(y.mean() - a * x.mean())
+    hi_aligned = a * hi32 + b
+    detail = hi_aligned - cv2.GaussianBlur(hi_aligned, (0, 0), s)
+    return (lo_l + detail).astype(np.float64)
+
+
 class MiDaS:
     def __init__(self, model_type: str = "MiDaS_small"):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_type = model_type
         print(f"[midas] Loading {model_type} on {self.device}...")
         self.model = (
             torch.hub.load("intel-isl/MiDaS", model_type, trust_repo=True)
@@ -153,17 +186,9 @@ class MiDaS:
         )
         print("[midas] Ready.")
 
-    @torch.no_grad()
-    def predict_depth(
-        self,
-        rgb_f32: np.ndarray,
-        debias_sigma_frac: float = 0.0,
-    ) -> np.ndarray:
-        """
-        rgb_f32 : HxWx3 float32 [0,1]
-        Returns : HxW float64 relative depth (larger = farther)
-        """
-        inp = self.tfm(rgb_f32).to(self.device)
+    def _run_model(self, inp: torch.Tensor, H: int, W: int) -> np.ndarray:
+        """Run the network on a prepared input and return disparity at (H, W)."""
+        inp = inp.to(self.device)
         use_amp = self.device.type == "cuda"
         with torch.autocast(self.device.type, dtype=torch.float16, enabled=use_amp):
             disp = self.model(inp)
@@ -172,8 +197,7 @@ class MiDaS:
             print("  [midas] non-finite fp16 output, retrying in fp32")
             with torch.autocast(self.device.type, enabled=False):
                 disp = self.model(inp.float())
-        H, W = rgb_f32.shape[:2]
-        disp = (
+        return (
             F.interpolate(
                 disp.unsqueeze(1), size=(H, W), mode="bicubic", align_corners=False
             )
@@ -182,6 +206,55 @@ class MiDaS:
             .float()
             .numpy()
         )
+
+    def _detail_input(self, rgb_f32: np.ndarray, long_side: int) -> torch.Tensor:
+        """Own resize + normalisation so the network can run above its default 384 px."""
+        H, W = rgb_f32.shape[:2]
+        scale = float(long_side) / max(H, W)
+        th = max(32, int(round(H * scale / 32.0)) * 32)
+        tw = max(32, int(round(W * scale / 32.0)) * 32)
+        img = cv2.resize(rgb_f32, (tw, th), interpolation=cv2.INTER_CUBIC)
+        if self.model_type in ("DPT_Large", "DPT_Hybrid"):
+            mean = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+            std = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        else:
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        x = (img.astype(np.float32) - mean) / std
+        return torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1))).unsqueeze(0)
+
+    @torch.no_grad()
+    def predict_depth(
+        self,
+        rgb_f32: np.ndarray,
+        debias_sigma_frac: float = 0.0,
+        depth_shift: float = DEFAULT_DEPTH_SHIFT,
+        detail_size: int = 0,
+    ) -> np.ndarray:
+        """
+        rgb_f32 : HxWx3 float32 [0,1]
+        Returns : HxW float64 relative depth (larger = farther)
+
+        depth_shift : offset in depth = 10 / (9.5 * disp_norm + shift). Small values
+            (the old 0.5) blow up the far tail: a small dark patch of low disparity
+            became ~10x farther than its surroundings, which showed up as strong
+            color blotches after recovery. Larger values compress that tail.
+        detail_size : if > 0, also run the network at this long side (e.g. 768) and
+            merge its fine detail onto the standard-resolution result (experimental).
+        """
+        H, W = rgb_f32.shape[:2]
+        disp = self._run_model(self.tfm(rgb_f32), H, W)
+        if detail_size and detail_size > 0:
+            try:
+                disp_hi = self._run_model(self._detail_input(rgb_f32, int(detail_size)), H, W)
+                if np.isfinite(disp_hi).all() and np.isfinite(disp).all():
+                    disp = merge_disparity_scales(disp, disp_hi)
+                else:
+                    print("  [midas] detail pass non-finite, using single scale")
+            except Exception as e:  # never let the optional pass break the run
+                print(f"  [midas] detail pass failed ({e}); using single scale", file=sys.stderr)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         if debias_sigma_frac > 0:
             # Remove very low-frequency disparity bias (common underwater spotlight artifact).
             sigma = max(1.0, float(min(H, W)) * float(debias_sigma_frac))
@@ -191,10 +264,9 @@ class MiDaS:
         lo, hi = np.percentile(disp, 1), np.percentile(disp, 99)
         if hi <= lo:
             hi = lo + 1e-6
-        # Invert disparity → depth; scale to [0.5, 10] m (relative)
-        # Clip to [0,1] so depth stays in [1, 20] and never goes negative.
+        # Invert disparity -> depth. disp_n in [0,1] => depth in [10/(9.5+s), 10/s].
         disp_n = np.clip((disp - lo) / (hi - lo), 0.0, 1.0)
-        depth = 10.0 / (disp_n * 9.5 + 0.5)
+        depth = 10.0 / (disp_n * 9.5 + max(float(depth_shift), 0.05))
         return depth.astype(np.float64)
 
 
@@ -1337,6 +1409,8 @@ def _resolve_depths_for_image(
     z_inf: float,
     depth_debias_sigma_frac: float,
     far_override: float | None = None,
+    depth_shift: float = DEFAULT_DEPTH_SHIFT,
+    depth_detail_size: int = 0,
 ) -> np.ndarray:
     mode_l = mode.lower()
     if mode_l not in {"predict", "map", "hybrid"}:
@@ -1348,7 +1422,10 @@ def _resolve_depths_for_image(
                 f"{mode} mode requested but MiDaS estimator is not initialized"
             )
         depths = estimator.predict_depth(
-            img.astype(np.float32), debias_sigma_frac=depth_debias_sigma_frac
+            img.astype(np.float32),
+            debias_sigma_frac=depth_debias_sigma_frac,
+            depth_shift=depth_shift,
+            detail_size=depth_detail_size,
         )
         if hint_source:
             hp = _resolve_depth_path_for_image(hint_source, img_path)
@@ -1443,6 +1520,22 @@ def main():
         type=float,
         default=0.0,
         help="If >0, removes low-frequency disparity bias before depth conversion. Recommended 0.03-0.08 underwater.",
+    )
+    ap.add_argument(
+        "--depth-shift",
+        type=float,
+        default=DEFAULT_DEPTH_SHIFT,
+        help="Predict mode: disparity offset in depth=10/(9.5*disp+shift) (default: 2.0; "
+        "old behaviour was 0.5). Larger values compress the far tail of the depth map, "
+        "which avoids color blotches where dark regions are mistaken for distant ones",
+    )
+    ap.add_argument(
+        "--depth-detail-size",
+        type=int,
+        default=0,
+        help="EXPERIMENTAL, Predict mode: also run MiDaS at this long side (e.g. 768) and "
+        "merge its fine detail into the standard-resolution depth (0 = off, default). "
+        "Falls back to single scale if it fails",
     )
     ap.add_argument(
         "--far",
@@ -1672,6 +1765,8 @@ def main():
                     z_inf=args.z_inf,
                     depth_debias_sigma_frac=args.depth_debias_sigma_frac,
                     far_override=args.far,
+                    depth_shift=args.depth_shift,
+                    depth_detail_size=args.depth_detail_size,
                 )
             except Exception as e:
                 print(f"Depth preparation failed for {p.name}: {e}", file=sys.stderr)

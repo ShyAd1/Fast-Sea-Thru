@@ -54,7 +54,7 @@ nvcc -O3 --shared -arch=native -o .\illuminant_cuda.dll .\illuminant.cu -ccbin "
 ### Run
 
 ```bash
-cd "C:\Users\adhev\Documents\GitHub\Fast-Sea-Thru" && python proyect/proyect.py images_train/02127044-af56-4d29-a8f6-db3933fd71a2.png -o output_mejorado --model DPT_Large --far 5 --illuminant-backend cuda --depth-colormap gray --depth-vis-min 0.5 --depth-vis-max 10 --save-depth-npy --save-intermediates
+cd "C:\Users\adhev\Documents\GitHub\Fast-Sea-Thru" && python proyect/proyect.py images_test/0e22de90-84e2-49e7-9b05-277cec2d454c.png -o output_mejorado --model DPT_Large --far 10 --illuminant-backend cuda --depth-colormap gray --depth-vis-min 0 --depth-vis-max 10 --save-depth-npy --save-intermediates
 ```
 
 CLI syntax:
@@ -83,7 +83,9 @@ Where input can be one or more image files and/or folders.
   - --depth: depth map file or depth directory (required for Map/Hybrid)
   - --hint: optional depth hint file/directory to rescale predicted depth
   - --model: MiDaS_small | DPT_Hybrid | DPT_Large (default: MiDaS_small)
-  - --far: manual scene far distance in meters for Predict mode; overrides the automatic estimate (see "Choosing --far")
+  - --depth-shift: Predict mode, disparity offset in `depth = 10 / (9.5 * disp + shift)` (default: 2.0; the old behavior was 0.5). Larger values compress the far tail of the depth map; see "Depth quality and color blotches"
+  - --depth-detail-size: EXPERIMENTAL, Predict mode: also run MiDaS at this long side (e.g. 768) and merge its fine detail into the standard-resolution depth (default 0 = off). If the extra pass fails it falls back to single scale with a warning
+  - --far: manual scene far distance in meters for Predict mode. It mostly sets the _units_ of the depth map (and the meaning of `--depth-vis-max` and `--att-cap`); it barely changes the restored image (see below)
   - --max-side: downscale the longest side to N pixels (default: 1280). Images are only ever reduced, never enlarged, so values above the image size do nothing
   - --depth-debias-sigma-frac: low-frequency disparity debias (default: 0.0; 0.03-0.08 recommended underwater)
   - --z-min: minimum valid depth when loading map depth (default: 0.1)
@@ -116,7 +118,8 @@ Where input can be one or more image files and/or folders.
 - Recovery controls
   - --beta-depth-cap: cap for attenuation\*depth term, <=0 disables cap (default: 1.2)
   - --att-cap: attenuation coefficient cap, <=0 disables cap (default: 1.2)
-  - The log prints `[cap] pixels at the beta*z cap R/G/B`. If those percentages are high, the caps (not the physics) are shaping the result: raise the caps or lower `--far`
+  - The log prints `[cap] pixels at the beta*z cap R/G/B`. If it is near 100%, the cap (not the physics) decides the result: every pixel gets the same gain and the depth map is effectively ignored. Raise `--beta-depth-cap`
+  - On the test image (ROV close-up, `--depth-shift 2`): 0.75/0.85 gave a conservative, natural look (100% of pixels capped); the default 1.2/1.2 kept more depth-dependent correction (about half capped) with no color cast; 1.5/1.5 started clipping highlights. Caps off was over-saturated
 
 - Output and diagnostics
   - --save-depth: save color depth PNG (enabled by default)
@@ -132,11 +135,14 @@ Where input can be one or more image files and/or folders.
   - --postprocess: enable final postprocess step (CLAHE + white balance; it amplifies contrast, noise and any existing color cast, so compare with and without it)
   - --postprocess-mode: original | fast (default: original)
 
-### Choosing --far (important for Predict mode)
+### Depth quality and color blotches (Predict mode)
 
-MiDaS gives only _relative_ depth. It is converted to meters by scaling its maximum to a "far" distance. By default that distance is guessed from the luminance contrast of the image, which can be far too large for close-ups lit by ROV lamps (e.g. `estimated far=19.5` for a scene a few meters wide). An inflated far makes every attenuation term `beta*z` too big, so the caps saturate and colors become inconsistent between regions.
+MiDaS gives only _relative_ inverse depth (disparity), converted to meters with `depth = 10 / (9.5 * disp + shift)`.
 
-If you know the rough working distance of your imagery, pass it with `--far` (e.g. `--far 3` to `--far 8` for ROV close-ups) and keep `--depth-vis-max` near it.
+- **Problem:** with the old offset (0.5) a small patch of low disparity became up to ~20x farther than its surroundings. Dark regions (shadows, recesses) tend to get low disparity, so they were treated as very distant. With loose caps this produced strong yellow/cyan blotches around those regions in the restored image. Tight caps (e.g. 0.75/0.85) hid the problem by giving every pixel the same gain.
+- **Fix:** `--depth-shift 2.0` (default) compresses that far tail (far/near ratio about 6 instead of 20). On the test image the blotch disappeared at shift 2 and was mostly gone at 1.5. Use `--depth-shift 0.5` to reproduce the old behavior.
+- **Global scale is irrelevant:** multiplying the whole depth map by a constant (what `--far` does) changes the restored image by about 0.5% on the test image, because the fitted attenuation coefficients scale inversely. Do not spend time tuning `--far` for color; only the _relative shape_ of the depth matters.
+- **Smoothness:** MiDaS runs internally at ~384 px, so the depth map is smooth and misses fine structure. Post-filtering it with an image-guided filter did not help in tests (it changes the map by about 1% and at high strength only imprints image texture). The experimental `--depth-detail-size 768` merges a higher-resolution pass instead; it has not been validated on real GPU runs, so compare the `_depth.png` and the restored image with and without it. Darkness-versus-distance is also partly physical under vehicle lamps (farther surfaces really are darker), so some correlation is expected.
 
 ### Useful notes
 
@@ -157,8 +163,8 @@ If you know the rough working distance of your imagery, pass it with `--far` (e.
 ### Recommended tuning workflow
 
 1. Run with `--save-intermediates --depth-colormap gray`, no `--postprocess`, `--illuminant-backend cuda`.
-2. Set `--far` to a realistic working distance and check the `[cap]` percentages in the log.
-3. Adjust `--beta-depth-cap` / `--att-cap` (start from the defaults 1.2).
+2. Check the `[cap]` percentages in the log: if they are near 100% the depth map is being ignored; raise `--beta-depth-cap`.
+3. Adjust `--beta-depth-cap` / `--att-cap` (start from the defaults 1.2) and, if you see color blotches near dark regions, try `--depth-shift` 1.5 to 3.
 4. Only then try `--postprocess --postprocess-mode fast` (or `original`).
 
 Tip: change one parameter group at a time and compare output visually before moving to the next group.
@@ -168,4 +174,6 @@ Tip: change one parameter group at a time and compare output visually before mov
 - `[dll] Failed to load` / `[illu] CUDA DLL unavailable`: rebuild with `build.bat`, keep the DLL next to `proyect.py`, and make sure the CUDA runtime DLLs are reachable (install folders under `Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin` and `CUDA_PATH` are registered automatically).
 - `[cuda] ... failed at ...`: the message names the failing CUDA call. The DLL frees its buffers and the call is retried once; if it fails again the run falls back to CPU (or stops with `--illuminant-backend cuda`). Out-of-memory errors usually mean other processes are using the GPU.
 - `[bs-gpu]` / `[att-gpu] failed (...)`: the fit falls back to the CPU automatically.
+- Yellow/cyan/magenta blotches around dark regions: the depth map overestimates distance there. Raise `--depth-shift` (default 2.0), or lower the caps.
+- `[midas] detail pass failed`: the experimental `--depth-detail-size` pass could not run (usually VRAM); the run continues with the standard depth.
 - `[midas] non-finite fp16 output`: the depth network overflowed in half precision and was recomputed in fp32 (no action needed).
