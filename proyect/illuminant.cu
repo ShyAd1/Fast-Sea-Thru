@@ -1,4 +1,13 @@
 /**
+ * Fast-Sea-Thru
+ * Copyright (C) 2026 Adair Hernández Valdivia
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ *
  * illuminant.cu  -  CUDA-accelerated illuminant map for Sea-Thru
  *
  * Replaces the BFS-based LSAC neighbourhood computation with a fixed

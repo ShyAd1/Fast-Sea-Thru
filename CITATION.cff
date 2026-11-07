@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "Fast-Sea-Thru"
+type: software
+authors:
+  - family-names: "Hernández Valdivia"
+    given-names: "Adair"
+repository-code: "https://github.com/ShyAd1/Fast-Sea-Thru"
+license: GPL-3.0-or-later
+preferred-citation:
+  type: article
+  title: "Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration"
+  authors:
+    - family-names: "Hernández Valdivia"
+      given-names: "Adair"
+  doi: "10.1007/978-3-032-37441-7_57"
+  year: 2026

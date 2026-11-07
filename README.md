@@ -1,6 +1,17 @@
-# download
+# Fast-Sea-Thru
 
-This directory contains the code and requirements for downloading the training and test datasets used for FathomNetCLEF 2026, plus the underwater image restoration project (`proyect/`, a fast Sea-Thru implementation).
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![DOI](https://img.shields.io/badge/DOI-10.1007%2F978--3--032--37441--7__57-blue)](https://doi.org/10.1007/978-3-032-37441-7_57)
+
+GPU-accelerated implementation of **Sea-Thru** for underwater image restoration (MiDaS depth estimation, backscatter removal, CUDA illuminant map and wideband attenuation recovery), plus the scripts used to download the training and test datasets of FathomNetCLEF 2026.
+
+This work is described in the paper *Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration* (see [Citation](#citation)).
+
+## Contents
+
+- `download.py`: dataset download tool (FathomNetCLEF 2026)
+- `proyect/`: underwater image restoration project (`proyect.py`, `illuminant.cu`, `build.bat`)
+- [Community files](#community-and-project-policies): contributing, code of conduct, security and accessibility
 
 ## Requirements
 
@@ -54,7 +65,7 @@ nvcc -O3 --shared -arch=native -o .\illuminant_cuda.dll .\illuminant.cu -ccbin "
 ### Run
 
 ```bash
-cd "C:\Users\adhev\Documents\GitHub\Fast-Sea-Thru" && python proyect/proyect.py images_test/0e22de90-84e2-49e7-9b05-277cec2d454c.png -o output_mejorado --model DPT_Large --far 10 --illuminant-backend cuda --depth-colormap gray --depth-vis-min 0 --depth-vis-max 10 --save-depth-npy --save-intermediates
+cd path/to/Fast-Sea-Thru && python proyect/proyect.py images_test/0e22de90-84e2-49e7-9b05-277cec2d454c.png -o output_mejorado --model DPT_Large --far 10 --illuminant-backend cuda --depth-colormap gray --depth-vis-min 0 --depth-vis-max 10 --save-depth-npy --save-intermediates
 ```
 
 CLI syntax:
@@ -177,3 +188,33 @@ Tip: change one parameter group at a time and compare output visually before mov
 - Yellow/cyan/magenta blotches around dark regions: the depth map overestimates distance there. Raise `--depth-shift` (default 2.0), or lower the caps.
 - `[midas] detail pass failed`: the experimental `--depth-detail-size` pass could not run (usually VRAM); the run continues with the standard depth.
 - `[midas] non-finite fp16 output`: the depth network overflowed in half precision and was recomputed in fp32 (no action needed).
+
+## Citation
+
+If you use this software or build on this work, please cite the paper:
+
+> Hernández Valdivia, A. *Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration*. 2026. DOI: [10.1007/978-3-032-37441-7_57](https://doi.org/10.1007/978-3-032-37441-7_57)
+
+```bibtex
+@misc{hernandezvaldivia2026seathru,
+  author = {Hern{\'a}ndez Valdivia, Adair},
+  title  = {Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration},
+  year   = {2026},
+  doi    = {10.1007/978-3-032-37441-7_57},
+  url    = {https://doi.org/10.1007/978-3-032-37441-7_57}
+}
+```
+
+GitHub also shows a **Cite this repository** button generated from [`CITATION.cff`](CITATION.cff).
+
+## Community and project policies
+
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+- [Accessibility statement](ACCESSIBILITY.md)
+- Bugs and feature requests: use the [issue templates](https://github.com/ShyAd1/Fast-Sea-Thru/issues/new/choose)
+
+## License
+
+This project is distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for details.

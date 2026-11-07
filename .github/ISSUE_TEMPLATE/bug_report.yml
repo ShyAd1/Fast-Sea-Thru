@@ -1,0 +1,49 @@
+name: Bug report
+description: Something is not working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! For security issues, please see SECURITY.md instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      description: The exact command line you ran.
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output
+      description: Include the `[dll]`, `[cap]` and error lines at least.
+      render: text
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Illuminant backend
+      options: [auto, cuda, window-cpu, bfs-cpu]
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, GPU, CUDA Toolkit version
+      placeholder: "Windows 11, Python 3.11, RTX 3060, CUDA 12.4"
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and the README troubleshooting section
+          required: true
