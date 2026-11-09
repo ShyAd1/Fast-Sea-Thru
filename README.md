@@ -193,11 +193,11 @@ Tip: change one parameter group at a time and compare output visually before mov
 
 If you use this software or build on this work, please cite the paper:
 
-> Hernández Valdivia, A. *Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration*. 2026. DOI: [10.1007/978-3-032-37441-7_57](https://doi.org/10.1007/978-3-032-37441-7_57)
+> Reyes Vera, A., Trejo Salgado, D., Moreno Galván, E., Hernández Valdivia, A., Hernández Méndez, L. A., & Torres Barajas, O. U. (2026). *Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration*. DOI: [10.1007/978-3-032-37441-7_57](https://doi.org/10.1007/978-3-032-37441-7_57)
 
 ```bibtex
-@misc{hernandezvaldivia2026seathru,
-  author = {Hern{\'a}ndez Valdivia, Adair},
+@misc{reyesvera2026seathru,
+  author = {Reyes Vera, Abdiel and Trejo Salgado, Diego and Moreno Galv{\'a}n, Elizabeth and Hern{\'a}ndez Valdivia, Adair and Hern{\'a}ndez M{\'e}ndez, Luis Angel and Torres Barajas, Oscar Uriel},
   title  = {Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration},
   year   = {2026},
   doi    = {10.1007/978-3-032-37441-7_57},

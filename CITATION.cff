@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it using the metadata below."
+message: "If you use this software, please cite the paper below."
 title: "Fast-Sea-Thru"
 type: software
 authors:
@@ -11,7 +11,17 @@ preferred-citation:
   type: article
   title: "Accelerating Sea-Thru: A GPU-Based Parallel Implementation for High-Resolution Underwater Image Restoration"
   authors:
+    - family-names: "Reyes Vera"
+      given-names: "Abdiel"
+    - family-names: "Trejo Salgado"
+      given-names: "Diego"
+    - family-names: "Moreno Galván"
+      given-names: "Elizabeth"
     - family-names: "Hernández Valdivia"
       given-names: "Adair"
+    - family-names: "Hernández Méndez"
+      given-names: "Luis Angel"
+    - family-names: "Torres Barajas"
+      given-names: "Oscar Uriel"
   doi: "10.1007/978-3-032-37441-7_57"
   year: 2026
