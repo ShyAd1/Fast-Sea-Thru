@@ -1,11 +1,4 @@
-# Fast-Sea-Thru
-# Copyright (C) 2026 Adair Hernández Valdivia
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
+#!/usr/bin/env python3
 """
 Sea-Thru Underwater Image Restoration
 Based on Sea-Thru-Impl by Zeyuan HE (Teragion)
@@ -20,6 +13,7 @@ import glob
 import math
 import os
 import sys
+import time
 import traceback
 from collections import deque
 from pathlib import Path
@@ -72,9 +66,9 @@ def _collect_input_images(inputs: list[str], recursive: bool = False) -> list[Pa
 
         if p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
-            candidates = [
+            candidates = sorted(
                 x for x in it if x.is_file() and x.suffix.lower() in IMAGE_EXTENSIONS
-            ]
+            )
         elif p.is_file():
             candidates = [p]
         else:
@@ -1292,14 +1286,70 @@ def recover_image(
     attenuation: np.ndarray,
     depths: np.ndarray,
     beta_depth_cap: float = 1.2,
+    clip: bool = True,
 ) -> np.ndarray:
-    """Undo depth-dependent attenuation to recover scene radiance (Eq. in paper)."""
+    """Undo depth-dependent attenuation to recover scene radiance (Eq. in paper).
+
+    clip=False returns the unclipped radiance (>= 0) so a tone-mapping step can use
+    the highlight information that the hard clip to [0, 1] would destroy."""
     beta_D = attenuation * depths[:, :, np.newaxis]
     # Optional cap; set <= 0 to disable clipping and match original recovery behavior.
     if beta_depth_cap > 0:
         beta_D = np.clip(beta_D, 0.0, beta_depth_cap)
     Ja = Da * np.exp(beta_D)
+    if not clip:
+        return np.clip(np.nan_to_num(Ja, nan=0.0, posinf=0.0, neginf=0.0), 0, None)
     return np.clip(Ja, 0, 1)
+
+
+def tone_map_image(
+    x: np.ndarray,
+    target_median: float = 0.38,
+    white_percentile: float = 99.7,
+    knee: float = 0.85,
+    min_gamma: float = 0.5,
+    black_floor: float = 0.03,
+    black_ramp: float = 0.20,
+) -> np.ndarray:
+    """Hue-preserving exposure for recovered (unclipped) radiance.
+
+    1. White point: scale so the `white_percentile` of the brightest channel maps to 1
+       (brightens dim scenes and pulls blown highlights back into range).
+    2. Brighten-only gamma on luminance so the median of the lit pixels reaches
+       `target_median` (never darkens; at most gamma = `min_gamma`).
+    3. Soft knee on the brightest channel instead of a hard clip.
+    All gains are applied equally to R, G and B, so colors are not shifted.
+
+    The gamma lift fades out below `black_ramp` luminance (no lift under `black_floor`):
+    dark open water keeps its black instead of turning into an amplified blue haze.
+    """
+    x = np.clip(np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+    m = x.max(axis=2)
+    nz = m > 1e-4
+    if not nz.any():
+        return np.clip(x, 0.0, 1.0)
+    w = max(float(np.percentile(m[nz], white_percentile)), 1e-3)
+    x = x / w
+    Y = 0.299 * x[..., 0] + 0.587 * x[..., 1] + 0.114 * x[..., 2]
+    Yc = np.minimum(Y, 1.0)
+    lit = Yc > 0.03
+    if lit.any() and target_median > 0:
+        med = float(np.median(Yc[lit]))
+        if 1e-3 < med < target_median:
+            gamma = float(np.clip(math.log(target_median) / math.log(med), min_gamma, 1.0))
+            s = np.where(Y > 1e-4, np.power(np.maximum(Y, 1e-4), gamma) / np.maximum(Y, 1e-4), 1.0)
+            s = np.minimum(s, 4.0)
+            t = np.clip((Y - black_floor) / max(black_ramp - black_floor, 1e-6), 0.0, 1.0)
+            fade = t * t * (3.0 - 2.0 * t)  # smoothstep: 0 for near-black, 1 for midtones
+            x = x * (1.0 + (s - 1.0) * fade)[..., None]
+    m = x.max(axis=2)
+    over = m > knee
+    if over.any():
+        mk = knee + (1.0 - knee) * np.tanh((m[over] - knee) / (1.0 - knee))
+        scale = np.ones_like(m)
+        scale[over] = mk / m[over]
+        x = x * scale[..., None]
+    return np.clip(x, 0.0, 1.0)
 
 
 def sea_thru(
@@ -1322,6 +1372,8 @@ def sea_thru(
     illuminant_f: float = 2.0,
     att_method: str = "robust",
     att_order: str = "rgb",
+    tone_target: float = 0.0,
+    tone_white_pct: float = 99.7,
 ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Full Sea-Thru pipeline.
@@ -1399,7 +1451,13 @@ def sea_thru(
         )
 
     print("[sea-thru] Recovering scene radiance...")
-    Ja = recover_image(Da, att, depths, beta_depth_cap=beta_depth_cap)
+    if tone_target > 0:
+        Ja = recover_image(Da, att, depths, beta_depth_cap=beta_depth_cap, clip=False)
+        Ja = tone_map_image(
+            Ja, target_median=tone_target, white_percentile=tone_white_pct
+        )
+    else:
+        Ja = recover_image(Da, att, depths, beta_depth_cap=beta_depth_cap)
     if return_intermediates:
         return Ja, Da, illu, att, Ba
     return Ja
@@ -1487,7 +1545,22 @@ def main():
         "--batch-size",
         type=int,
         default=1,
-        help="Number of input images processed per batch report (default: 1)",
+        help="Only groups the progress output into 'Batch i/n' headers (default: 1). "
+        "It does NOT limit how many images are processed and does not speed anything up; "
+        "use --limit to process fewer images",
+    )
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Process at most N images (0 = all, default). Images are taken in sorted "
+        "order, after --skip-existing is applied",
+    )
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip images whose <prefix><name>_restored.png already exists in the output "
+        "folder (lets you resume an interrupted run or process a big folder in chunks)",
     )
     ap.add_argument(
         "--recursive",
@@ -1719,6 +1792,23 @@ def main():
         help="rgb: force attenuation R>=G>=B (physical prior, default); none: keep raw fits",
     )
     ap.add_argument(
+        "--tone-target",
+        type=float,
+        default=0.38,
+        help="Exposure/tone mapping before clipping: target median luminance of the lit "
+        "pixels (default: 0.38; 0 = off). Rescales to a white point, brightens dark "
+        "scenes with a luminance-only gamma (faded out in near-black areas so dark water "
+        "stays black) and rolls highlights off smoothly instead of clipping them. "
+        "Hue-preserving",
+    )
+    ap.add_argument(
+        "--tone-white-pct",
+        type=float,
+        default=99.7,
+        help="Percentile of the brightest channel mapped to white when --tone-target is "
+        "on (default: 99.7; lower values make the image brighter and clip more)",
+    )
+    ap.add_argument(
         "--save-intermediates",
         action="store_true",
         help="Save direct signal and illuminant map images",
@@ -1736,6 +1826,26 @@ def main():
         print("No input images found.", file=sys.stderr)
         sys.exit(1)
 
+    found = len(image_paths)
+    skipped = 0
+    if args.skip_existing:
+        todo = [
+            p
+            for p in image_paths
+            if not (out_dir / (args.prefix + p.stem + "_restored.png")).exists()
+        ]
+        skipped = found - len(todo)
+        image_paths = todo
+    if args.limit and args.limit > 0:
+        image_paths = image_paths[: args.limit]
+    print(
+        f"[batch] {found} image(s) found, {skipped} already done (skipped), "
+        f"{len(image_paths)} to process"
+    )
+    if not image_paths:
+        print("Nothing to process.")
+        return
+
     mode_l = args.mode.lower()
     needs_midas = mode_l in {"predict", "hybrid"}
     if mode_l == "map" and not args.depth:
@@ -1747,16 +1857,20 @@ def main():
     total = len(image_paths)
     batch_count = math.ceil(total / max(1, args.batch_size))
     done = 0
+    failed = 0
+    t_start = time.time()
     for bi, batch in enumerate(_iter_batches(image_paths, args.batch_size), start=1):
         print(
             f"\n{'#'*60}\nBatch {bi}/{batch_count} | size={len(batch)} | processed={done}/{total}\n{'#'*60}"
         )
         for p in batch:
             print(f"\n{'='*60}\nProcessing: {p.name}\n{'='*60}")
+            t_img = time.time()
             try:
                 img = read_image(str(p), args.max_side)
             except FileNotFoundError as e:
                 print(e, file=sys.stderr)
+                failed += 1
                 continue
 
             print(f"  Size: {img.shape[1]}x{img.shape[0]}")
@@ -1777,6 +1891,7 @@ def main():
                 )
             except Exception as e:
                 print(f"Depth preparation failed for {p.name}: {e}", file=sys.stderr)
+                failed += 1
                 continue
             print(
                 "  Depth stats: "
@@ -1829,10 +1944,13 @@ def main():
                     illuminant_f=args.illuminant_f,
                     att_method=args.att_method,
                     att_order=args.att_order,
+                    tone_target=args.tone_target,
+                    tone_white_pct=args.tone_white_pct,
                 )
             except Exception as e:
                 print(f"Sea-Thru failed for {p.name}: {e}", file=sys.stderr)
                 traceback.print_exc()
+                failed += 1
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 continue
@@ -1857,8 +1975,24 @@ def main():
             save_image(str(out_path), restored)
             print(f"  Saved -> {out_path}")
             done += 1
+            dt = time.time() - t_img
+            elapsed = time.time() - t_start
+            remaining = (len(image_paths) - done - failed) * (elapsed / max(done + failed, 1))
+            print(
+                f"  Done in {dt:.1f}s | {done + failed}/{len(image_paths)} | "
+                f"elapsed {elapsed/60:.1f} min | ETA {remaining/60:.1f} min"
+            )
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()  # keep VRAM free for the next image / CUDA DLL
+
+    total_time = time.time() - t_start
+    print(
+        f"\n[batch] Finished: {done} saved, {failed} failed, {skipped} skipped earlier, "
+        f"{total_time/60:.1f} min total"
+        + (f", {total_time/max(done, 1):.1f} s/image" if done else "")
+    )
+    if failed:
+        print("[batch] Some images failed: search this log for 'failed'.", file=sys.stderr)
 
 
 if __name__ == "__main__":
